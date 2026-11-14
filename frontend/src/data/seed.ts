@@ -1,4 +1,6 @@
-import type { EntryRow } from './types'
+import { MODULE_BY_KEY } from './modules'
+import { buildIdempotencyKey, itemKeyOf, objectFieldOf, serializeRow } from './receipts'
+import type { AuditReceipt, EntryRow, LedgerState } from './types'
 
 // 示例数据：首次打开时播种，之后浏览器里的改动优先，重置才会回到这份。
 export const SEED_ROWS: Record<string, EntryRow[]> = {
@@ -794,4 +796,71 @@ export const SEED_ROWS: Record<string, EntryRow[]> = {
       "最后更新": "编目检索样例3"
     }
   ],
+}
+
+function clone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
+}
+
+// 种子审计记录对应的业务动作：让示例账本里的审计记录和凭据链一一对得上。
+const SEED_AUDIT_SPECS = [
+  { auditId: 1, module: 'ods', rowId: 2, action: '提交校验', from: '草稿' },
+  { auditId: 2, module: 'catalog', rowId: 2, action: '提交发布', from: '草稿' },
+  { auditId: 3, module: 'ods', rowId: 3, action: '启用同步', from: '待校验' },
+]
+
+/**
+ * 构建带凭据链的种子账本：三条种子审计记录各自对应一张签章凭据，
+ * 变更前值/变更后值、操作来源、受影响对象与凭据字节完全一致，回看核对即为「一致」。
+ */
+export function buildSeedLedger(): LedgerState {
+  const entries = clone(SEED_ROWS)
+  const receipts: AuditReceipt[] = []
+  let seal = 0
+  for (const spec of SEED_AUDIT_SPECS) {
+    const meta = MODULE_BY_KEY.get(spec.module)
+    const after = (entries[spec.module] ?? []).find((row) => Number(row.id) === spec.rowId)
+    const auditRow = (entries.audit ?? []).find((row) => Number(row.id) === spec.auditId)
+    if (!meta || !after || !auditRow) continue
+    const before: EntryRow = { ...after, status: spec.from, pending: true, abnormal: false }
+    const itemKey = itemKeyOf(meta, after)
+    seal += 1
+    const receiptId = `RCP-${String(seal).padStart(6, '0')}`
+    const receipt: AuditReceipt = {
+      receipt_id: receiptId,
+      seal_seq: seal,
+      idempotency_key: buildIdempotencyKey(spec.module, spec.rowId, spec.action, spec.from),
+      primary: true,
+      root_id: receiptId,
+      module_key: spec.module,
+      module_name: meta.name,
+      action: spec.action,
+      item_key: itemKey,
+      item_keys: [itemKey],
+      from_status: spec.from,
+      to_status: String(after.status),
+      before_bytes: serializeRow(before),
+      after_bytes: serializeRow(after),
+      source: `${meta.name}界面 · 值班管理员`,
+      operator: '值班管理员',
+      affected: String(after[objectFieldOf(meta)] ?? itemKey),
+      created_at: `2026-09-0${spec.auditId}T09:00:00.000Z`,
+    }
+    receipts.push(receipt)
+    Object.assign(auditRow, {
+      操作表名: receipt.affected,
+      变更类型: spec.action,
+      变更前值: receipt.before_bytes,
+      变更后值: receipt.after_bytes,
+      操作来源: receipt.source,
+      回滚脚本: `-- 凭据 ${receipt.receipt_id}\nUPDATE ${spec.module} SET status='${spec.from}' WHERE id=${spec.rowId};`,
+      receipt_id: receipt.receipt_id,
+      seal_seq: receipt.seal_seq,
+      idempotency_key: receipt.idempotency_key,
+      root_id: receipt.root_id,
+      module_key: spec.module,
+      item_key: itemKey,
+    })
+  }
+  return { entries, receipts, seal, auditSeq: 3 }
 }

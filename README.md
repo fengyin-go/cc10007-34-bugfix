@@ -12,9 +12,12 @@
 ```text
 .
 ├── frontend/                 Vue 3 + Vite + TypeScript 前端（唯一运行单元）
-│   ├── src/views/            每个业务模块一个页面
-│   ├── src/api/local-service.ts   本地数据服务：列表、筛选、动作流转、导出
-│   ├── src/data/             模块元数据 / 示例数据 / localStorage 持久化
+│   ├── src/views/            每个业务模块一个页面（薄封装，渲染交给 ModulePage）
+│   ├── src/components/ModulePage.vue   业务模块共用页面：列表、筛选、动作、详情抽屉
+│   ├── src/api/local-service.ts   本地数据服务：列表、筛选、动作流转、双写提交、导出
+│   ├── src/data/ledger.ts    账本存储：业务行 + 凭据链一个键整体落库
+│   ├── src/data/receipts.ts  凭据链：顺序签章、幂等键、回看核对
+│   ├── src/data/             模块元数据 / 示例数据 / 账本持久化
 │   ├── src/stores/           会话与筛选状态
 │   └── vite.config.ts        dev server 配置（open: false，无 /api 代理）
 ├── .gitignore
@@ -63,12 +66,39 @@ npm run build
 
 ## 约定
 
-- 每个模块的页面在 `frontend/src/views/<模块>/index.vue`，页面只负责渲染，读写统一走
-  `frontend/src/api/local-service.ts`。
+- 每个模块的页面在 `frontend/src/views/<模块>/index.vue`，业务模块统一渲染
+  `frontend/src/components/ModulePage.vue`，变更审计页因含送审/核对逻辑单独实现。
 - 字段、状态、动作与流转目标集中在 `frontend/src/data/modules.ts`；示例数据在
   `frontend/src/data/seed.ts`。
 - 状态流转只允许在 `local-service.ts` 里改，页面组件不做业务判断。
-- 想回到初始数据：清掉浏览器里 `data-layer-studio:entries` 这一项，或调用 `resetModule(模块)`。
+- 想回到初始数据：清掉浏览器里 `data-layer-studio:ledger` 这一项，或调用 `resetModule(模块)`。
+
+## 操作凭证双写
+
+业务动作（如贴源层「启用同步」、编目「发布条目」）和审计凭据在
+`frontend/src/data/ledger.ts` 的 `commitLedger` 里同笔提交：业务行、审计记录、签章凭据
+一次 `setItem` 整体落库，任何一步失败（含存储写失败）整笔回退，不会出现业务改了、
+审计库没凭证的半提交状态。
+
+- **凭据链**：所有动作（含审计记录自身的送审/归档/忽略）都在链上签章一张凭据，
+  全局顺序签章 `seal_seq` 严格递增；同一 `idempotency_key` 只保留一份 primary 凭据，
+  重复动作命中幂等键时沿用既有凭据，不重复登记。
+- **忽略门禁**：只有送审（审核中）后的审计凭据可忽略；忽略必须保留旧字节
+  （变更前值）、操作来源与受影响对象（操作表名），缺失即整笔回退。
+- **整组送审**：审计页多选集合确定审阅范围，`reviewAuditEntries` 逐条返回
+  `item_key` 成功码，整组一次提交只签章一个 root 凭据。
+- **同源读取**：业务界面（凭据签章列、详情抽屉）和审计界面（凭据核对列、详情抽屉）
+  都从同一条凭据链读取；回看时以变更审计记录为主对象核对其审计凭据
+  （`verifyAuditEntry`）。
+- **一致性**：列表页与详情页读同一个账本快照；跨标签页写入会让本页缓存失效，
+  避免列表残留旧对象、详情值对不上。
+
+数据层冒烟测试（双写、回退、忽略门禁、幂等键、整组送审、列表/详情一致）：
+
+```bash
+cd frontend
+npm run test
+```
 
 领域：数据工程
 子方向：数仓与数据湖
